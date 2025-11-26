@@ -3,7 +3,7 @@ import logging
 import aiohttp
 import json
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.enums import ChatAction
 
@@ -11,11 +11,15 @@ from aiogram.enums import ChatAction
 # ⚙️ الإعدادات
 # ==========================================
 
+# 1. توكن البوت
 BOT_TOKEN = "8395701844:AAHaPmHA4cM1WGqz3IWqNpx0YwS5tauqyhE"
+
+# 2. آيدي المطور
 ADMIN_ID = 6595593335
 
-# التوكن الحالي (من طلبك الأخير)
-CURRENT_GEMINI_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQyNDkzMjgsInN1YiI6IjY3MGJkNmNlLWM5NTktMTFmMC1iNjcwLTJlZjgyZDcwM2EwOSJ9.H4_yBgPCdFn8ZB5ie8bbGu3FdsGfFcsySPKTwhjX9ac"
+# 3. توكن GeminiGen (الجديد من طلبك الأخير)
+# هذا التوكن سيعمل الآن، ولتفعيله تلقائياً لاحقاً نحتاج لـ Login API
+CURRENT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQyNDkzMjgsInN1YiI6IjY3MGJkNmNlLWM5NTktMTFmMC1iNjcwLTJlZjgyZDcwM2EwOSJ9.H4_yBgPCdFn8ZB5ie8bbGu3FdsGfFcsySPKTwhjX9ac"
 
 API_BASE = "https://api.geminigen.ai"
 
@@ -31,25 +35,33 @@ album_buffer = {}
 # ==========================================
 class GeminiClient:
     def __init__(self):
-        self.token = CURRENT_GEMINI_TOKEN
+        self.token = CURRENT_TOKEN
         self.update_headers()
 
     def update_headers(self):
-        """تحديث الهيدرز عند تغيير التوكن"""
+        """تحديث الهيدرز بناءً على التوكن الحالي"""
+        # تم نسخ الهيدرز بدقة من طلب cURL الأخير
         self.headers = {
             "authority": "api.geminigen.ai",
             "accept": "application/json, text/plain, */*",
             "accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
-            "authorization": f"Bearer {self.token}",  # استخدام Bearer
+            "authorization": f"Bearer {self.token}", # رجعنا لاستخدام Bearer حسب طلبك الأخير
             "origin": "https://geminigen.ai",
             "referer": "https://geminigen.ai/",
             "user-agent": "Mozilla/5.0 (Linux; Android 10; M2006C3LC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36"
         }
 
-    def set_new_token(self, new_token):
-        """وظيفة لتحديث التوكن بدون إيقاف البوت"""
-        self.token = new_token.strip()
-        self.update_headers()
+    async def report_error(self, type_err, msg):
+        try:
+            await bot.send_message(ADMIN_ID, f"🚨 **System Error**\nType: {type_err}\nDetails: `{str(msg)[:3000]}`")
+        except: pass
+
+    # 🔄 دالة التجديد التلقائي (مكان السحر المستقبلي)
+    async def auto_refresh_token(self):
+        # ملاحظة: لكي تعمل هذه الدالة، نحتاج لطلب Login cURL
+        # حالياً سنقوم فقط بإبلاغك
+        await self.report_error("Token Expired", "حاول البوت التجديد لكن لا يوجد رابط Login.")
+        return False
 
     async def generate_image(self, prompt, aspect_ratio, images_data=None):
         timeout = aiohttp.ClientTimeout(total=300)
@@ -63,31 +75,33 @@ class GeminiClient:
                 data.add_field('style', 'None')
 
                 if images_data:
-                    print(f"🚀 Sending Edit Request ({len(images_data)} images)...")
+                    print(f"🚀 Edit Request ({len(images_data)} images)...")
                     for i, img_bytes in enumerate(images_data):
-                        # تعديل اسم الملف ليكون كما يفضله السيرفر
+                        # اسم الحقل: files (كما في الـ curl)
                         data.add_field('files', img_bytes, filename=f"image_{i}.jpg", content_type='image/jpeg')
                 else:
-                    print("🚀 Sending Generate Request...")
+                    print("🚀 Generate Request...")
 
                 # 1. إرسال الطلب
                 async with session.post(f"{API_BASE}/api/generate_image", data=data) as resp:
                     resp_text = await resp.text()
                     
-                    if resp.status == 401 or resp.status == 403:
-                        raise Exception("⛔️ التوكن منتهي الصلاحية! أرسل /token ثم الكود الجديد.")
-                    
+                    # إذا انتهى التوكن (401)، نحاول التجديد (مستقبلاً)
+                    if resp.status == 401:
+                        await self.report_error("Token Expired (401)", "التوكن انتهى ويحتاج تجديد.")
+                        return None, "انتهت صلاحية الجلسة."
+
                     if resp.status != 200:
-                        raise Exception(f"API Error {resp.status}: {resp_text[:200]}")
+                        await self.report_error(f"API Error {resp.status}", resp_text)
+                        return None, f"خطأ من المصدر: {resp.status}"
                     
                     result = json.loads(resp_text)
 
                 uuid = result.get('uuid')
-                if not uuid:
-                    raise Exception(f"No UUID: {result}")
+                if not uuid: return None, "لم يتم استلام UUID"
 
                 # 2. انتظار النتيجة
-                print(f"⏳ Waiting for UUID: {uuid}")
+                print(f"⏳ UUID: {uuid}")
                 image_url = None
                 
                 for _ in range(100):
@@ -100,21 +114,22 @@ class GeminiClient:
                                 image_url = status_data['generated_image'][0]['image_url']
                                 break
                             elif status == 3:
-                                error_msg = status_data.get('error_message') or status_data.get('error')
-                                raise Exception(f"رفض السيرفر: {error_msg}")
+                                err_msg = status_data.get('error_message') or "Unknown"
+                                if "high traffic" in str(err_msg).lower():
+                                    return None, "⚠️ السيرفر مشغول جداً، حاول لاحقاً."
+                                return None, f"رفض السيرفر: {err_msg}"
                         
                     await asyncio.sleep(3)
                 
-                if not image_url:
-                    raise Exception("Timeout")
+                if not image_url: return None, "انتهى الوقت."
 
-                # 3. تحميل الصورة
-                async with aiohttp.ClientSession() as img_session:
-                    async with img_session.get(image_url) as img_get:
-                        if img_get.status == 200:
-                            return await img_get.read(), None
+                # 3. تحميل الصورة (جلسة نظيفة)
+                async with aiohttp.ClientSession() as dl_session:
+                    async with dl_session.get(image_url) as img_resp:
+                        if img_resp.status == 200:
+                            return await img_resp.read(), None
                         else:
-                            raise Exception("فشل تحميل الصورة النهائية")
+                            return None, "فشل تحميل الصورة النهائية"
 
             except Exception as e:
                 return None, str(e)
@@ -122,52 +137,31 @@ class GeminiClient:
 gemini = GeminiClient()
 
 # ==========================================
-# 🔐 التحقق من الأدمن
+# 🔐 الصلاحيات والكيبورد
 # ==========================================
-def is_admin(user_id):
-    return user_id == ADMIN_ID
+def is_admin(uid): return uid == ADMIN_ID
 
 def get_size_keyboard():
     keyboard = [
         [InlineKeyboardButton(text="مربع (1:1) 🟦", callback_data="size:1:1")],
-        [InlineKeyboardButton(text="طولي (9:16) 📱", callback_data="size:9:16"),
-         InlineKeyboardButton(text="عريض (16:9) 💻", callback_data="size:16:9")],
+        [InlineKeyboardButton(text="عريض (16:9) 💻", callback_data="size:16:9"),
+         InlineKeyboardButton(text="طولي (9:16) 📱", callback_data="size:9:16")],
         [InlineKeyboardButton(text="إلغاء ❌", callback_data="cancel")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ==========================================
-# 🔄 ميزة التحديث التلقائي للتوكن (الجديد)
+# 📩 الهاندلرز
 # ==========================================
-@dp.message(Command("token"))
-async def update_token_command(msg: types.Message):
-    if not is_admin(msg.from_user.id): return
-
-    try:
-        # استخراج التوكن من الرسالة (مثال: /token eyJhbGc...)
-        new_token = msg.text.split(" ", 1)[1]
-        gemini.set_new_token(new_token)
-        await msg.reply("✅ **تم تحديث التوكن بنجاح!**\nيمكنك استخدام البوت الآن.")
-        print(f"♻️ Token updated via chat.")
-    except IndexError:
-        await msg.reply("⚠️ خطأ في الصيغة.\nأرسل الأمر هكذا:\n`/token الكود_الجديد_هنا`", parse_mode="Markdown")
-
-# ==========================================
-# 📩 معالجة الرسائل
-# ==========================================
-
 @dp.message(CommandStart())
 async def start(msg: types.Message):
-    if is_admin(msg.from_user.id): await msg.answer("👋 **أهلاً بك!**")
+    if is_admin(msg.from_user.id): await msg.answer("🤖 البوت جاهز ويعمل بالنظام الجديد.")
 
 @dp.message(F.text)
 async def handle_text(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    # تجاهل أمر التوكن هنا
-    if msg.text.startswith("/token"): return 
-    
     user_pending[msg.from_user.id] = {'prompt': msg.text, 'images': None, 'msg_id': msg.message_id}
-    await msg.reply("📏 اختر مقاس الصورة:", reply_markup=get_size_keyboard())
+    await msg.reply("📏 اختر المقاس:", reply_markup=get_size_keyboard())
 
 @dp.message(F.photo)
 async def handle_photos(msg: types.Message):
@@ -194,7 +188,7 @@ async def process_images(ctx, msgs):
         await ctx.reply("⚠️ اكتب وصفاً.")
         return
     
-    wait = await ctx.reply("📥 تحميل الصور...")
+    wait = await ctx.reply(f"📥 استلام {len(msgs)} صور...")
     try:
         images = []
         for m in msgs:
@@ -232,7 +226,7 @@ async def on_size(call: CallbackQuery):
         except:
              await call.message.answer_photo(file, caption=f"✅ {data['prompt']}")
     else:
-        await call.message.edit_text(f"❌ حدث خطأ: {err}")
+        await call.message.edit_text(f"❌ {err}")
 
 @dp.callback_query(F.data == "cancel")
 async def on_cancel(call: CallbackQuery):
