@@ -14,10 +14,10 @@ from aiogram.enums import ChatAction
 # 1. توكن البوت
 BOT_TOKEN = "8395701844:AAHaPmHA4cM1WGqz3IWqNpx0YwS5tauqyhE"
 
-# 2. آيدي الأدمن (لاستقبال الأخطاء)
-ADMIN_ID = 123456789  # 👈 ضع الآيدي الخاص بك هنا
+# 2. آيدي المطور (لاستقبال تقارير الأخطاء الخام)
+ADMIN_ID = 6595593335
 
-# 3. توكن GeminiGen (الجديد من طلبك الأخير)
+# 3. توكن GeminiGen (الجديد من طلب cURL الأخير)
 GEMINI_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQxNzg0MTksInN1YiI6IjY3MGJkNmNlLWM5NTktMTFmMC1iNjcwLTJlZjgyZDcwM2EwOSJ9.PMeS1YB_Q_TrWKaQKhUe8jB4x7qZzwTnZHlAp--h-Xw"
 
 API_BASE = "https://api.geminigen.ai"
@@ -34,7 +34,7 @@ album_buffer = {}
 # ==========================================
 class GeminiClient:
     def __init__(self):
-        # هيدرز مطابقة تماماً لطلب المتصفح (بدون Content-Type)
+        # الهيدرز مطابقة تماماً لطلب cURL الجديد
         self.api_headers = {
             "authority": "api.geminigen.ai",
             "accept": "application/json, text/plain, */*",
@@ -42,50 +42,67 @@ class GeminiClient:
             "authorization": f"Bearer {GEMINI_TOKEN}",
             "origin": "https://geminigen.ai",
             "referer": "https://geminigen.ai/",
-            "user-agent": "Mozilla/5.0 (Linux; Android 10; M2006C3LC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36"
+            "user-agent": "Mozilla/5.0 (Linux; Android 10; M2006C3LC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36",
+            # ملاحظة: لا نضع content-type هنا يدوياً، المكتبة ستضعه تلقائياً مع الـ boundary
         }
 
+    async def report_error_to_admin(self, error_type, details):
+        """دالة لإرسال الخطأ الخام للمطور"""
+        try:
+            error_msg = f"🚨 **SYSTEM ERROR REPORT**\n\n**Type:** {error_type}\n\n**Details (Raw):**\n`{str(details)[:3500]}`" 
+            await bot.send_message(ADMIN_ID, error_msg)
+        except Exception as e:
+            print(f"Failed to send error to admin: {e}")
+
     async def generate_image(self, prompt, aspect_ratio, images_data=None):
-        # مهلة 5 دقائق
-        timeout = aiohttp.ClientTimeout(total=300)
+        timeout = aiohttp.ClientTimeout(total=300) # 5 دقائق
         
         async with aiohttp.ClientSession(headers=self.api_headers, timeout=timeout) as session:
             try:
-                # إعداد البيانات (FormData هو السر لنجاح الرفع)
+                # بناء البيانات (Multipart Form Data)
                 data = aiohttp.FormData()
                 
-                # 1. إضافة الحقول النصية أولاً (كما في الطلب)
+                # 1. الحقول النصية (كما في الطلب)
                 data.add_field('prompt', prompt)
                 data.add_field('model', 'imagen-pro')
                 data.add_field('aspect_ratio', aspect_ratio)
                 data.add_field('style', 'None')
 
-                # 2. إضافة الصور
+                # 2. ملفات الصور (Files)
                 if images_data:
                     print(f"🚀 Sending Edit Request ({len(images_data)} images)...")
                     for i, img_bytes in enumerate(images_data):
-                        # الاسم يجب أن يكون "files" حصراً
+                        # الاسم يجب أن يكون "files"
                         data.add_field(
                             'files', 
                             img_bytes, 
-                            filename=f"image_{i}.jpg", # اسم وهمي ضروري
-                            content_type='image/jpeg'  # نوع المحتوى ضروري
+                            filename=f"image_{i}.jpg", 
+                            content_type='image/jpeg'
                         )
                 else:
                     print("🚀 Sending Generate Request...")
 
-                # أ. إرسال الطلب
+                # 3. إرسال الطلب (POST)
                 async with session.post(f"{API_BASE}/api/generate_image", data=data) as resp:
+                    response_text = await resp.text()
+                    
+                    # فحص الأخطاء المباشرة
                     if resp.status != 200:
-                        text = await resp.text()
-                        raise Exception(f"API Error {resp.status}: {text[:200]}")
-                    result = await resp.json()
+                        await self.report_error_to_admin(f"API POST Failed ({resp.status})", response_text)
+                        raise Exception("فشل الاتصال بالسيرفر (HTTP Error).")
+                    
+                    try:
+                        result = json.loads(response_text)
+                    except:
+                        await self.report_error_to_admin("JSON Parse Error", response_text)
+                        raise Exception("رد السيرفر غير مفهوم.")
 
                 uuid = result.get('uuid')
                 if not uuid:
-                    raise Exception(f"No UUID returned: {result}")
+                    await self.report_error_to_admin("Missing UUID", response_text)
+                    raise Exception("لم يتم استلام معرف المهمة.")
 
-                # ب. انتظار النتيجة
+                # 4. انتظار النتيجة (Polling)
                 print(f"⏳ Waiting for UUID: {uuid}")
                 image_url = None
                 
@@ -95,29 +112,34 @@ class GeminiClient:
                             status_data = await hist_resp.json()
                             status = status_data.get('status')
                             
-                            if status == 2: # نجاح
+                            if status == 2: # نجاح ✅
                                 image_url = status_data['generated_image'][0]['image_url']
                                 break 
                             
-                            elif status == 3: # فشل
-                                error_msg = status_data.get('error', 'Unknown Error')
-                                # طباعة تفاصيل الخطأ
-                                print(f"❌ Server Status 3 Details: {status_data}")
-                                raise Exception(f"رفض السيرفر المعالجة (Status 3).")
+                            elif status == 3: # فشل ❌
+                                await self.report_error_to_admin("Job Failed (Status 3)", json.dumps(status_data, indent=2))
+                                error_desc = status_data.get('error', 'Unknown Error')
+                                raise Exception(f"رفض السيرفر الطلب: {error_desc}")
+                        else:
+                            # خطأ في فحص الحالة
+                            raw_hist = await hist_resp.text()
+                            await self.report_error_to_admin(f"History Check Failed ({hist_resp.status})", raw_hist)
                         
                     await asyncio.sleep(3)
                 
                 if not image_url:
+                    await self.report_error_to_admin("Timeout", f"UUID: {uuid} stuck in processing.")
                     raise Exception("انتهت مهلة الانتظار.")
 
-                # ج. تحميل الصورة (بدون هيدرز الـ API لتجنب المشاكل)
+                # 5. تحميل الصورة النهائية (جلسة نظيفة)
                 print(f"📥 Downloading Image...")
                 async with aiohttp.ClientSession() as img_session:
                     async with img_session.get(image_url) as img_get:
                         if img_get.status == 200:
                             return await img_get.read(), None
                         else:
-                            raise Exception(f"فشل تحميل الصورة النهائية (HTTP {img_get.status})")
+                            await self.report_error_to_admin("Image Download Failed", f"URL: {image_url}\nStatus: {img_get.status}")
+                            raise Exception("فشل تحميل الصورة النهائية.")
 
             except Exception as e:
                 return None, str(e)
@@ -144,8 +166,9 @@ def get_size_keyboard():
 
 @dp.message(CommandStart())
 async def start(msg: types.Message):
-    await msg.answer("👋 **مرحباً!** أرسل نصاً للتوليد، أو صورة للتعديل.")
+    await msg.answer("👋 **مرحباً!**\nأرسل نصاً للتوليد، أو صوراً للتعديل.")
 
+# استقبال النص
 @dp.message(F.text)
 async def handle_text(msg: types.Message):
     user_pending[msg.from_user.id] = {
@@ -155,7 +178,7 @@ async def handle_text(msg: types.Message):
     }
     await msg.reply("📏 اختر مقاس الصورة:", reply_markup=get_size_keyboard())
 
-# معالجة الصور (الألبومات)
+# استقبال الصور (معالجة الألبومات)
 @dp.message(F.photo)
 async def handle_photos(msg: types.Message):
     user_id = msg.from_user.id
@@ -202,12 +225,13 @@ async def process_images(msg_context, messages_list):
         }
         
         await wait_msg.delete()
-        await msg_context.reply(f"📸 تم استلام {len(images_data)} صور.\n📏 اختر مقاس النتيجة:", reply_markup=get_size_keyboard())
+        await msg_context.reply(f"📸 تم استلام {len(images_data)} صور.\n📏 اختر المقاس:", reply_markup=get_size_keyboard())
 
     except Exception as e:
         await wait_msg.delete()
-        if ADMIN_ID:
-            await bot.send_message(ADMIN_ID, f"⚠️ Error loading images:\n{str(e)}")
+        await msg_context.reply("❌ حدث خطأ أثناء استقبال الصور.")
+        # إرسال تقرير للمطور
+        await bot.send_message(ADMIN_ID, f"🚨 **Telegram Download Error**\n`{str(e)}`")
 
 # ==========================================
 # 🖱️ معالجة الأزرار
@@ -226,8 +250,8 @@ async def on_size_select(call: CallbackQuery):
     prompt = data['prompt']
     images = data['images']
     
-    action_text = "تعديل" if images else "توليد"
-    await call.message.edit_text(f"⏳ جاري {action_text} الصورة...")
+    mode = "تعديل" if images else "توليد"
+    await call.message.edit_text(f"⏳ جاري {mode} الصورة...\nقد يستغرق الأمر دقيقتين.")
     await bot.send_chat_action(call.message.chat.id, ChatAction.UPLOAD_PHOTO)
     
     final_img_bytes, error = await gemini.generate_image(prompt, size, images)
@@ -240,9 +264,9 @@ async def on_size_select(call: CallbackQuery):
         except:
              await call.message.answer_photo(file, caption=f"✅ {prompt}")
     else:
-        await call.message.edit_text("❌ عذراً، حدث خطأ، حاول لاحقاً.")
-        if ADMIN_ID:
-            await bot.send_message(ADMIN_ID, f"🚨 **Error Report**\nUser: `{user_id}`\nPrompt: {prompt}\nError: `{error}`")
+        # رسالة بسيطة للمستخدم
+        await call.message.edit_text("❌ حدث خطأ أثناء المعالجة. تم إشعار المطور.")
+        # التفاصيل للمطور في الخاص (تمت المعالجة داخل الدالة generate_image)
 
 @dp.callback_query(F.data == "cancel")
 async def on_cancel(call: CallbackQuery):
@@ -250,8 +274,11 @@ async def on_cancel(call: CallbackQuery):
         del user_pending[call.from_user.id]
     await call.message.delete()
 
+# ==========================================
+# 🚀 التشغيل
+# ==========================================
 async def main():
-    print("🤖 Bot Started...")
+    print("🤖 Bot Started with Advanced Error Reporting...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
