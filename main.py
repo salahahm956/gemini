@@ -13,13 +13,13 @@ from aiogram.enums import ChatAction
 # ==========================================
 
 BOT_TOKEN = "8395701844:AAHaPmHA4cM1WGqz3IWqNpx0YwS5tauqyhE"
-ADMIN_ID = 6595593335 # هذا هو "السوبر أدمن" الذي لا يمكن حذفه
+ADMIN_ID = 6595593335 
 
-# التوكن الحالي (من طلبك الأخير)
+# التوكن الحالي
 CURRENT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQyNTE0OTcsInN1YiI6IjA2ZmJhNjcwLWNhY2YtMTFmMC1iMDNiLTUyZTQxZGI1MzgyZCJ9.fEA2-5na2Jpu-eJhrDvfAb7uAl4m_lSpVo2n0VbE-dk"
 
 API_BASE = "https://api.geminigen.ai/api"
-USERS_FILE = "users.json" # ملف لحفظ المستخدمين
+USERS_FILE = "users.json"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -29,31 +29,26 @@ user_pending = {}
 album_buffer = {}
 
 # ==========================================
-# 📂 نظام إدارة المستخدمين (JSON)
+# 📂 إدارة المستخدمين
 # ==========================================
 def load_users():
-    if not os.path.exists(USERS_FILE):
-        return [ADMIN_ID] # الافتراضي: الأدمن فقط
+    if not os.path.exists(USERS_FILE): return [ADMIN_ID]
     try:
         with open(USERS_FILE, 'r') as f:
             users = json.load(f)
             if ADMIN_ID not in users: users.append(ADMIN_ID)
             return users
-    except:
-        return [ADMIN_ID]
+    except: return [ADMIN_ID]
 
 def save_users(users_list):
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users_list, f)
+    with open(USERS_FILE, 'w') as f: json.dump(users_list, f)
 
-# تحميل القائمة عند البدء
 ALLOWED_USERS = set(load_users())
 
-def is_authorized(user_id):
-    return user_id in ALLOWED_USERS
+def is_authorized(user_id): return user_id in ALLOWED_USERS
 
 # ==========================================
-# 🧠 كلاس التعامل مع Gemini API
+# 🧠 كلاس Gemini API
 # ==========================================
 class GeminiClient:
     def __init__(self):
@@ -86,21 +81,16 @@ class GeminiClient:
                 data.add_field('style', 'None')
 
                 if images_data:
-                    print(f"🚀 Edit Request ({len(images_data)} images)...")
                     for i, img_bytes in enumerate(images_data):
                         data.add_field('files', img_bytes, filename=f"image_{i}.jpg", content_type='image/jpeg')
-                else:
-                    print("🚀 Generate Request...")
 
                 async with session.post(f"{API_BASE}/generate_image", data=data) as resp:
-                    if resp.status != 200:
-                        return None, f"خطأ {resp.status}"
+                    if resp.status != 200: return None, f"HTTP {resp.status}"
                     result = await resp.json()
 
                 uuid = result.get('uuid')
                 if not uuid: return None, "No UUID"
 
-                print(f"⏳ UUID: {uuid}")
                 image_url = None
                 for _ in range(60):
                     async with session.get(f"{API_BASE}/history/{uuid}") as hist_resp:
@@ -117,11 +107,9 @@ class GeminiClient:
 
                 async with aiohttp.ClientSession() as dl_session:
                     async with dl_session.get(image_url) as img_resp:
-                        if img_resp.status == 200:
-                            return await img_resp.read(), None
+                        if img_resp.status == 200: return await img_resp.read(), None
                         return None, "Download Error"
-            except Exception as e:
-                return None, str(e)
+            except Exception as e: return None, str(e)
 
 gemini = GeminiClient()
 
@@ -138,84 +126,67 @@ def get_size_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ==========================================
-# 👮‍♂️ أوامر الإدارة (Add/Remove Users)
+# 👮‍♂️ أوامر الإدارة (يجب أن تكون في الأعلى)
 # ==========================================
 
-# إضافة مستخدم: /id 12345
 @dp.message(Command("id"))
 async def add_user(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID: return # للأدمن فقط
+    if msg.from_user.id != ADMIN_ID: return
     try:
         new_id = int(msg.text.split()[1])
         if new_id in ALLOWED_USERS:
-            await msg.reply("⚠️ المستخدم موجود بالفعل.")
+            await msg.reply("⚠️ موجود بالفعل.")
         else:
             ALLOWED_USERS.add(new_id)
             save_users(list(ALLOWED_USERS))
-            await msg.reply(f"✅ تمت إضافة المستخدم: `{new_id}`", parse_mode="Markdown")
-            # إشعار للمستخدم الجديد (اختياري)
-            try: await bot.send_message(new_id, "🎉 تم تفعيل حسابك لاستخدام البوت!")
-            except: pass
-    except:
-        await msg.reply("⚠️ خطأ. الصيغة:\n`/id الآيدي`", parse_mode="Markdown")
+            await msg.reply(f"✅ تمت الإضافة: `{new_id}`", parse_mode="Markdown")
+    except: await msg.reply("خطأ. مثال: `/id 12345`", parse_mode="Markdown")
 
-# حذف مستخدم: /ids 12345
 @dp.message(Command("ids"))
 async def remove_user(msg: types.Message):
     if msg.from_user.id != ADMIN_ID: return
     try:
         target_id = int(msg.text.split()[1])
-        if target_id == ADMIN_ID:
-            await msg.reply("🚫 لا يمكنك حذف الأدمن!")
-            return
-        
+        if target_id == ADMIN_ID: return
         if target_id in ALLOWED_USERS:
             ALLOWED_USERS.remove(target_id)
             save_users(list(ALLOWED_USERS))
-            await msg.reply(f"🗑️ تم حذف المستخدم: `{target_id}`", parse_mode="Markdown")
-        else:
-            await msg.reply("⚠️ هذا المستخدم غير موجود.")
-    except:
-        await msg.reply("⚠️ خطأ. الصيغة:\n`/ids الآيدي`", parse_mode="Markdown")
+            await msg.reply(f"🗑️ تم الحذف: `{target_id}`", parse_mode="Markdown")
+        else: await msg.reply("غير موجود.")
+    except: await msg.reply("خطأ. مثال: `/ids 12345`", parse_mode="Markdown")
 
-# عرض القائمة: /users
 @dp.message(Command("users"))
 async def list_users(msg: types.Message):
     if msg.from_user.id != ADMIN_ID: return
-    text = "👥 **قائمة المصرح لهم:**\n\n"
-    for uid in ALLOWED_USERS:
-        text += f"🆔 `{uid}`\n"
+    text = "👥 **القائمة:**\n" + "\n".join([f"`{u}`" for u in ALLOWED_USERS])
     await msg.reply(text, parse_mode="Markdown")
 
-# تحديث التوكن: /token
 @dp.message(Command("token"))
 async def update_token(msg: types.Message):
     if msg.from_user.id != ADMIN_ID: return
     try:
-        new_key = msg.text.split(maxsplit=1)[1]
-        gemini.set_new_token(new_key)
-        await msg.reply("✅ تم تحديث التوكن.")
-    except:
-        await msg.reply("⚠️ خطأ في التوكن.")
+        gemini.set_new_token(msg.text.split(maxsplit=1)[1])
+        await msg.reply("✅ تم التحديث.")
+    except: await msg.reply("خطأ.")
 
 # ==========================================
-# 📩 معالجة الرسائل (للمصرح لهم فقط)
+# 📩 معالجة الرسائل العادية
 # ==========================================
 
 @dp.message(CommandStart())
 async def start(msg: types.Message):
     if not is_authorized(msg.from_user.id):
-        await msg.answer("⛔️ عذراً، هذا البوت خاص.")
+        await msg.answer("⛔️ خاص.")
         return
-    await msg.answer("👋 **أهلاً بك!**\nأرسل نصاً للتوليد، أو صورة للتعديل.")
+    await msg.answer("👋 أهلاً بك!")
 
-@dp.message(F.text)
+# ✅ الإصلاح هنا: إضافة فلتر ليتجاهل أي رسالة تبدأ بـ /
+@dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(msg: types.Message):
     if not is_authorized(msg.from_user.id): return
-    if msg.text.startswith("/"): return # تجاهل الأوامر
     
     user_pending[msg.from_user.id] = {'prompt': msg.text, 'images': None, 'msg_id': msg.message_id}
-    await msg.reply("📏 اختر مقاس الصورة:", reply_markup=get_size_keyboard())
+    await msg.reply("📏 اختر المقاس:", reply_markup=get_size_keyboard())
 
 @dp.message(F.photo)
 async def handle_photos(msg: types.Message):
@@ -255,8 +226,7 @@ async def process_images(ctx, msgs):
         await ctx.reply("📏 اختر المقاس:", reply_markup=get_size_keyboard())
     except Exception as e:
         await wait.delete()
-        if ctx.from_user.id == ADMIN_ID:
-            await ctx.reply(f"Error: {e}")
+        if ctx.from_user.id == ADMIN_ID: await ctx.reply(f"Error: {e}")
 
 @dp.callback_query(F.data.startswith("size:"))
 async def on_size(call: CallbackQuery):
@@ -282,7 +252,7 @@ async def on_size(call: CallbackQuery):
         except:
              await call.message.answer_photo(file, caption=f"✅ {data['prompt']}")
     else:
-        await call.message.edit_text(f"❌ حدث خطأ: {err}")
+        await call.message.edit_text(f"❌ {err}")
 
 @dp.callback_query(F.data == "cancel")
 async def on_cancel(call: CallbackQuery):
