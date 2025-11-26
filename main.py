@@ -15,9 +15,9 @@ from aiogram.enums import ChatAction
 BOT_TOKEN = "8395701844:AAHaPmHA4cM1WGqz3IWqNpx0YwS5tauqyhE"
 
 # 2. آيدي الأدمن (لاستقبال الأخطاء)
-ADMIN_ID = 6595593335 # 👈 ضع الآيدي الخاص بك هنا
+ADMIN_ID = 123456789  # 👈 ضع الآيدي الخاص بك هنا
 
-# 3. توكن GeminiGen (من طلبك الأخير)
+# 3. توكن GeminiGen (الجديد من طلبك الأخير)
 GEMINI_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQxNzg0MTksInN1YiI6IjY3MGJkNmNlLWM5NTktMTFmMC1iNjcwLTJlZjgyZDcwM2EwOSJ9.PMeS1YB_Q_TrWKaQKhUe8jB4x7qZzwTnZHlAp--h-Xw"
 
 API_BASE = "https://api.geminigen.ai"
@@ -34,7 +34,7 @@ album_buffer = {}
 # ==========================================
 class GeminiClient:
     def __init__(self):
-        # هيدرز الـ API فقط
+        # هيدرز مطابقة تماماً لطلب المتصفح (بدون Content-Type)
         self.api_headers = {
             "authority": "api.geminigen.ai",
             "accept": "application/json, text/plain, */*",
@@ -46,26 +46,35 @@ class GeminiClient:
         }
 
     async def generate_image(self, prompt, aspect_ratio, images_data=None):
+        # مهلة 5 دقائق
         timeout = aiohttp.ClientTimeout(total=300)
         
-        # 1. جلسة خاصة للـ API (تحتوي على التوكن والهيدرز)
         async with aiohttp.ClientSession(headers=self.api_headers, timeout=timeout) as session:
             try:
-                # إعداد البيانات
+                # إعداد البيانات (FormData هو السر لنجاح الرفع)
                 data = aiohttp.FormData()
+                
+                # 1. إضافة الحقول النصية أولاً (كما في الطلب)
                 data.add_field('prompt', prompt)
                 data.add_field('model', 'imagen-pro')
                 data.add_field('aspect_ratio', aspect_ratio)
                 data.add_field('style', 'None')
 
+                # 2. إضافة الصور
                 if images_data:
                     print(f"🚀 Sending Edit Request ({len(images_data)} images)...")
                     for i, img_bytes in enumerate(images_data):
-                        data.add_field('files', img_bytes, filename=f"image_{i}.jpg", content_type='image/jpeg')
+                        # الاسم يجب أن يكون "files" حصراً
+                        data.add_field(
+                            'files', 
+                            img_bytes, 
+                            filename=f"image_{i}.jpg", # اسم وهمي ضروري
+                            content_type='image/jpeg'  # نوع المحتوى ضروري
+                        )
                 else:
                     print("🚀 Sending Generate Request...")
 
-                # أ. إرسال طلب التوليد
+                # أ. إرسال الطلب
                 async with session.post(f"{API_BASE}/api/generate_image", data=data) as resp:
                     if resp.status != 200:
                         text = await resp.text()
@@ -76,11 +85,11 @@ class GeminiClient:
                 if not uuid:
                     raise Exception(f"No UUID returned: {result}")
 
-                # ب. انتظار النتيجة (Polling)
+                # ب. انتظار النتيجة
                 print(f"⏳ Waiting for UUID: {uuid}")
                 image_url = None
                 
-                for _ in range(100): # 5 دقائق
+                for _ in range(100): # محاولة لمدة 5 دقائق
                     async with session.get(f"{API_BASE}/api/history/{uuid}") as hist_resp:
                         if hist_resp.status == 200:
                             status_data = await hist_resp.json()
@@ -88,27 +97,27 @@ class GeminiClient:
                             
                             if status == 2: # نجاح
                                 image_url = status_data['generated_image'][0]['image_url']
-                                break # نخرج من اللوب
+                                break 
                             
                             elif status == 3: # فشل
                                 error_msg = status_data.get('error', 'Unknown Error')
-                                raise Exception(f"فشل التوليد من المصدر (Status 3): {error_msg}")
+                                # طباعة تفاصيل الخطأ
+                                print(f"❌ Server Status 3 Details: {status_data}")
+                                raise Exception(f"رفض السيرفر المعالجة (Status 3).")
                         
                     await asyncio.sleep(3)
                 
                 if not image_url:
-                    raise Exception("انتهت مهلة الانتظار ولم تجهز الصورة.")
+                    raise Exception("انتهت مهلة الانتظار.")
 
-                # ج. تحميل الصورة النهائية (الحل الجذري هنا 👇)
-                # نستخدم جلسة جديدة تماماً بدون هيدرز الـ API لتجنب تعارض التوكن مع سيرفر الصور
-                print(f"📥 Downloading Image from: {image_url}")
+                # ج. تحميل الصورة (بدون هيدرز الـ API لتجنب المشاكل)
+                print(f"📥 Downloading Image...")
                 async with aiohttp.ClientSession() as img_session:
                     async with img_session.get(image_url) as img_get:
                         if img_get.status == 200:
                             return await img_get.read(), None
                         else:
-                            # طباعة كود الخطأ من سيرفر الصور
-                            raise Exception(f"فشل تحميل الصورة (HTTP {img_get.status})")
+                            raise Exception(f"فشل تحميل الصورة النهائية (HTTP {img_get.status})")
 
             except Exception as e:
                 return None, str(e)
@@ -124,10 +133,6 @@ def get_size_keyboard():
         [
             InlineKeyboardButton(text="طولي (9:16) 📱", callback_data="size:9:16"),
             InlineKeyboardButton(text="عريض (16:9) 💻", callback_data="size:16:9"),
-        ],
-        [
-            InlineKeyboardButton(text="أفقي (4:3) 📷", callback_data="size:4:3"),
-            InlineKeyboardButton(text="سينمائي (21:9) 🎬", callback_data="size:21:9"),
         ],
         [InlineKeyboardButton(text="إلغاء ❌", callback_data="cancel")]
     ]
@@ -150,6 +155,7 @@ async def handle_text(msg: types.Message):
     }
     await msg.reply("📏 اختر مقاس الصورة:", reply_markup=get_size_keyboard())
 
+# معالجة الصور (الألبومات)
 @dp.message(F.photo)
 async def handle_photos(msg: types.Message):
     user_id = msg.from_user.id
@@ -201,7 +207,7 @@ async def process_images(msg_context, messages_list):
     except Exception as e:
         await wait_msg.delete()
         if ADMIN_ID:
-            await bot.send_message(ADMIN_ID, f"⚠️ Error processing images:\nUser: {msg_context.from_user.id}\nError: {str(e)}")
+            await bot.send_message(ADMIN_ID, f"⚠️ Error loading images:\n{str(e)}")
 
 # ==========================================
 # 🖱️ معالجة الأزرار
@@ -234,9 +240,9 @@ async def on_size_select(call: CallbackQuery):
         except:
              await call.message.answer_photo(file, caption=f"✅ {prompt}")
     else:
-        await call.message.edit_text("❌ عذراً، حدث خطأ.")
+        await call.message.edit_text("❌ عذراً، حدث خطأ، حاول لاحقاً.")
         if ADMIN_ID:
-            await bot.send_message(ADMIN_ID, f"🚨 **Technical Error Report**\nUser ID: `{user_id}`\nAction: {action_text}\nPrompt: {prompt}\nError Details: `{error}`")
+            await bot.send_message(ADMIN_ID, f"🚨 **Error Report**\nUser: `{user_id}`\nPrompt: {prompt}\nError: `{error}`")
 
 @dp.callback_query(F.data == "cancel")
 async def on_cancel(call: CallbackQuery):
