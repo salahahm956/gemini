@@ -15,7 +15,7 @@ from aiogram.enums import ChatAction
 BOT_TOKEN = "8395701844:AAHaPmHA4cM1WGqz3IWqNpx0YwS5tauqyhE"
 
 # 2. آيدي الأدمن (لاستقبال الأخطاء)
-ADMIN_ID = 123456789 # 👈 ضع الآيدي الخاص بك هنا
+ADMIN_ID = 6595593335 # 👈 ضع الآيدي الخاص بك هنا
 
 # 3. توكن GeminiGen (من طلبك الأخير)
 GEMINI_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQxNzg0MTksInN1YiI6IjY3MGJkNmNlLWM5NTktMTFmMC1iNjcwLTJlZjgyZDcwM2EwOSJ9.PMeS1YB_Q_TrWKaQKhUe8jB4x7qZzwTnZHlAp--h-Xw"
