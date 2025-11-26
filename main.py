@@ -3,7 +3,7 @@ import logging
 import aiohttp
 import json
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.enums import ChatAction
 
@@ -14,11 +14,11 @@ from aiogram.enums import ChatAction
 BOT_TOKEN = "8395701844:AAHaPmHA4cM1WGqz3IWqNpx0YwS5tauqyhE"
 ADMIN_ID = 6595593335
 
-# التوكن الجديد (المستخرج من cURL)
+# التوكن من طلبك الناجح الأخير
 CURRENT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQyNTE0OTcsInN1YiI6IjA2ZmJhNjcwLWNhY2YtMTFmMC1iMDNiLTUyZTQxZGI1MzgyZCJ9.fEA2-5na2Jpu-eJhrDvfAb7uAl4m_lSpVo2n0VbE-dk"
 
-# العودة للرابط القديم حسب طلبك
-API_BASE = "https://api.geminigen.ai/api" 
+# ⚠️ العودة للرابط القديم لأنه هو الذي يعمل معك
+API_BASE = "https://api.geminigen.ai/api"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -28,25 +28,31 @@ user_pending = {}
 album_buffer = {}
 
 # ==========================================
-# 🧠 كلاس التعامل مع API (المحاكي للمتصفح)
+# 🧠 كلاس التعامل مع Gemini API
 # ==========================================
 class GeminiClient:
     def __init__(self):
-        # محاكاة هيدرز المتصفح بدقة
+        self.token = CURRENT_TOKEN
+        self.update_headers()
+
+    def update_headers(self):
         self.headers = {
             "authority": "api.geminigen.ai",
             "accept": "application/json, text/plain, */*",
             "accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
-            "authorization": f"Bearer {CURRENT_TOKEN}",
+            "authorization": f"Bearer {self.token}",
             "origin": "https://geminigen.ai",
             "referer": "https://geminigen.ai/",
             "user-agent": "Mozilla/5.0 (Linux; Android 10; M2006C3LC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36"
-            # Content-Type يتم إضافته تلقائياً لضبط الـ boundary
         }
+
+    def set_new_token(self, new_token):
+        self.token = new_token.replace("Bearer ", "").strip()
+        self.update_headers()
 
     async def report_error(self, type_err, msg):
         try:
-            await bot.send_message(ADMIN_ID, f"🚨 **System Error**\nType: {type_err}\nRaw: `{str(msg)[:3000]}`")
+            await bot.send_message(ADMIN_ID, f"🚨 **System Error**\nType: {type_err}\nDetails: `{str(msg)[:3000]}`")
         except: pass
 
     async def generate_image(self, prompt, aspect_ratio, images_data=None):
@@ -54,7 +60,6 @@ class GeminiClient:
         
         async with aiohttp.ClientSession(headers=self.headers, timeout=timeout) as session:
             try:
-                # بناء البيانات (Multipart)
                 data = aiohttp.FormData()
                 data.add_field('prompt', prompt)
                 data.add_field('model', 'imagen-pro')
@@ -64,62 +69,60 @@ class GeminiClient:
                 if images_data:
                     print(f"🚀 Sending Edit Request ({len(images_data)} images)...")
                     for i, img_bytes in enumerate(images_data):
-                        # الاسم 'files' هو ما يطلبه السيرفر
                         data.add_field('files', img_bytes, filename=f"image_{i}.jpg", content_type='image/jpeg')
                 else:
                     print("🚀 Sending Generate Request...")
 
-                # 1. إرسال الطلب
+                # 1. إرسال الطلب (للرابط القديم)
                 async with session.post(f"{API_BASE}/generate_image", data=data) as resp:
                     resp_text = await resp.text()
                     
+                    if resp.status in [401, 403]:
+                        await self.report_error("Token Expired", "التوكن انتهى. يرجى التحديث بـ /token")
+                        return None, "⚠️ انتهت الجلسة."
+
                     if resp.status != 200:
-                        await self.report_error(f"HTTP Error {resp.status}", resp_text)
-                        return None, f"خطأ من السيرفر: {resp.status}"
+                        # في حال الخطأ، نحاول الرابط الجديد كخطة بديلة تلقائياً
+                        if resp.status == 404:
+                             await self.report_error("404 Error", "الرابط القديم لم يعمل، حاول تغيير API_BASE إلى uapi/v1 يدوياً")
+                        else:
+                             await self.report_error(f"API Error {resp.status}", resp_text)
+                        return None, f"خطأ من المصدر: {resp.status}"
                     
-                    try:
-                        result = json.loads(resp_text)
-                    except:
-                        return None, "الرد ليس JSON صالح."
+                    result = json.loads(resp_text)
 
                 uuid = result.get('uuid')
                 if not uuid: return None, "لم يتم استلام UUID"
 
                 # 2. انتظار النتيجة
-                print(f"⏳ Waiting for UUID: {uuid}")
+                print(f"⏳ UUID: {uuid}")
                 image_url = None
                 
                 for _ in range(100):
-                    # رابط متابعة الحالة (History)
                     async with session.get(f"{API_BASE}/history/{uuid}") as hist_resp:
                         if hist_resp.status == 200:
                             status_data = await hist_resp.json()
                             status = status_data.get('status')
                             
-                            if status == 2: # نجاح
+                            if status == 2:
                                 image_url = status_data['generated_image'][0]['image_url']
                                 break
-                            elif status == 3: # فشل
+                            elif status == 3:
                                 err_msg = status_data.get('error_message') or "Unknown"
                                 if "high traffic" in str(err_msg).lower():
-                                    return None, "⚠️ ضغط عالي على السيرفر، حاول لاحقاً."
-                                await self.report_error("Job Failed (Status 3)", json.dumps(status_data, indent=2))
+                                    return None, "⚠️ السيرفر مشغول جداً."
                                 return None, f"رفض السيرفر: {err_msg}"
                         
                     await asyncio.sleep(3)
                 
                 if not image_url: return None, "انتهى الوقت."
 
-                # 3. تحميل الصورة (جلسة نظيفة تماماً)
-                print("⬇️ Downloading final image...")
-                # نستخدم هيدر بسيط جداً للتحميل فقط لتجنب 403 Forbidden
-                dl_headers = {"User-Agent": "Mozilla/5.0"}
-                async with aiohttp.ClientSession(headers=dl_headers) as dl_session:
+                # 3. تحميل الصورة (جلسة نظيفة)
+                async with aiohttp.ClientSession() as dl_session:
                     async with dl_session.get(image_url) as img_resp:
                         if img_resp.status == 200:
                             return await img_resp.read(), None
                         else:
-                            await self.report_error("Download Failed", f"Status: {img_resp.status}\nURL: {image_url}")
                             return None, "فشل تحميل الصورة النهائية"
 
             except Exception as e:
@@ -128,7 +131,7 @@ class GeminiClient:
 gemini = GeminiClient()
 
 # ==========================================
-# 🔐 الصلاحيات والكيبورد
+# 🔐 الصلاحيات
 # ==========================================
 def is_admin(uid): return uid == ADMIN_ID
 
@@ -142,17 +145,31 @@ def get_size_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ==========================================
+# 🔄 تحديث التوكن
+# ==========================================
+@dp.message(Command("token"))
+async def update_token(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    try:
+        new_key = msg.text.split(maxsplit=1)[1]
+        gemini.set_new_token(new_key)
+        await msg.reply("✅ تم التحديث.")
+    except:
+        await msg.reply("⚠️ خطأ.")
+
+# ==========================================
 # 📩 الهاندلرز
 # ==========================================
 @dp.message(CommandStart())
 async def start(msg: types.Message):
-    if is_admin(msg.from_user.id): await msg.answer("👋 **البوت جاهز (Unofficial Mode)**")
+    if is_admin(msg.from_user.id): await msg.answer("👋 **البوت جاهز!**")
 
 @dp.message(F.text)
 async def handle_text(msg: types.Message):
     if not is_admin(msg.from_user.id): return
+    if msg.text.startswith("/token"): return
     user_pending[msg.from_user.id] = {'prompt': msg.text, 'images': None, 'msg_id': msg.message_id}
-    await msg.reply("📏 اختر مقاس الصورة:", reply_markup=get_size_keyboard())
+    await msg.reply("📏 اختر المقاس:", reply_markup=get_size_keyboard())
 
 @dp.message(F.photo)
 async def handle_photos(msg: types.Message):
