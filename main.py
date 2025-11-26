@@ -2,6 +2,7 @@ import asyncio
 import logging
 import aiohttp
 import json
+import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -12,13 +13,13 @@ from aiogram.enums import ChatAction
 # ==========================================
 
 BOT_TOKEN = "8395701844:AAHaPmHA4cM1WGqz3IWqNpx0YwS5tauqyhE"
-ADMIN_ID = 6595593335
+ADMIN_ID = 6595593335 # هذا هو "السوبر أدمن" الذي لا يمكن حذفه
 
-# التوكن من طلبك الناجح الأخير
+# التوكن الحالي (من طلبك الأخير)
 CURRENT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQyNTE0OTcsInN1YiI6IjA2ZmJhNjcwLWNhY2YtMTFmMC1iMDNiLTUyZTQxZGI1MzgyZCJ9.fEA2-5na2Jpu-eJhrDvfAb7uAl4m_lSpVo2n0VbE-dk"
 
-# ⚠️ العودة للرابط القديم لأنه هو الذي يعمل معك
 API_BASE = "https://api.geminigen.ai/api"
+USERS_FILE = "users.json" # ملف لحفظ المستخدمين
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -26,6 +27,30 @@ dp = Dispatcher()
 
 user_pending = {}
 album_buffer = {}
+
+# ==========================================
+# 📂 نظام إدارة المستخدمين (JSON)
+# ==========================================
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return [ADMIN_ID] # الافتراضي: الأدمن فقط
+    try:
+        with open(USERS_FILE, 'r') as f:
+            users = json.load(f)
+            if ADMIN_ID not in users: users.append(ADMIN_ID)
+            return users
+    except:
+        return [ADMIN_ID]
+
+def save_users(users_list):
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users_list, f)
+
+# تحميل القائمة عند البدء
+ALLOWED_USERS = set(load_users())
+
+def is_authorized(user_id):
+    return user_id in ALLOWED_USERS
 
 # ==========================================
 # 🧠 كلاس التعامل مع Gemini API
@@ -50,14 +75,8 @@ class GeminiClient:
         self.token = new_token.replace("Bearer ", "").strip()
         self.update_headers()
 
-    async def report_error(self, type_err, msg):
-        try:
-            await bot.send_message(ADMIN_ID, f"🚨 **System Error**\nType: {type_err}\nDetails: `{str(msg)[:3000]}`")
-        except: pass
-
     async def generate_image(self, prompt, aspect_ratio, images_data=None):
         timeout = aiohttp.ClientTimeout(total=300)
-        
         async with aiohttp.ClientSession(headers=self.headers, timeout=timeout) as session:
             try:
                 data = aiohttp.FormData()
@@ -67,74 +86,48 @@ class GeminiClient:
                 data.add_field('style', 'None')
 
                 if images_data:
-                    print(f"🚀 Sending Edit Request ({len(images_data)} images)...")
+                    print(f"🚀 Edit Request ({len(images_data)} images)...")
                     for i, img_bytes in enumerate(images_data):
                         data.add_field('files', img_bytes, filename=f"image_{i}.jpg", content_type='image/jpeg')
                 else:
-                    print("🚀 Sending Generate Request...")
+                    print("🚀 Generate Request...")
 
-                # 1. إرسال الطلب (للرابط القديم)
                 async with session.post(f"{API_BASE}/generate_image", data=data) as resp:
-                    resp_text = await resp.text()
-                    
-                    if resp.status in [401, 403]:
-                        await self.report_error("Token Expired", "التوكن انتهى. يرجى التحديث بـ /token")
-                        return None, "⚠️ انتهت الجلسة."
-
                     if resp.status != 200:
-                        # في حال الخطأ، نحاول الرابط الجديد كخطة بديلة تلقائياً
-                        if resp.status == 404:
-                             await self.report_error("404 Error", "الرابط القديم لم يعمل، حاول تغيير API_BASE إلى uapi/v1 يدوياً")
-                        else:
-                             await self.report_error(f"API Error {resp.status}", resp_text)
-                        return None, f"خطأ من المصدر: {resp.status}"
-                    
-                    result = json.loads(resp_text)
+                        return None, f"خطأ {resp.status}"
+                    result = await resp.json()
 
                 uuid = result.get('uuid')
-                if not uuid: return None, "لم يتم استلام UUID"
+                if not uuid: return None, "No UUID"
 
-                # 2. انتظار النتيجة
                 print(f"⏳ UUID: {uuid}")
                 image_url = None
-                
-                for _ in range(100):
+                for _ in range(60):
                     async with session.get(f"{API_BASE}/history/{uuid}") as hist_resp:
                         if hist_resp.status == 200:
                             status_data = await hist_resp.json()
-                            status = status_data.get('status')
-                            
-                            if status == 2:
+                            if status_data.get('status') == 2:
                                 image_url = status_data['generated_image'][0]['image_url']
                                 break
-                            elif status == 3:
-                                err_msg = status_data.get('error_message') or "Unknown"
-                                if "high traffic" in str(err_msg).lower():
-                                    return None, "⚠️ السيرفر مشغول جداً."
-                                return None, f"رفض السيرفر: {err_msg}"
-                        
-                    await asyncio.sleep(3)
+                            elif status_data.get('status') == 3:
+                                return None, "فشل التوليد"
+                    await asyncio.sleep(5)
                 
-                if not image_url: return None, "انتهى الوقت."
+                if not image_url: return None, "Timeout"
 
-                # 3. تحميل الصورة (جلسة نظيفة)
                 async with aiohttp.ClientSession() as dl_session:
                     async with dl_session.get(image_url) as img_resp:
                         if img_resp.status == 200:
                             return await img_resp.read(), None
-                        else:
-                            return None, "فشل تحميل الصورة النهائية"
-
+                        return None, "Download Error"
             except Exception as e:
                 return None, str(e)
 
 gemini = GeminiClient()
 
 # ==========================================
-# 🔐 الصلاحيات
+# ⌨️ الكيبورد
 # ==========================================
-def is_admin(uid): return uid == ADMIN_ID
-
 def get_size_keyboard():
     keyboard = [
         [InlineKeyboardButton(text="مربع (1:1) 🟦", callback_data="size:1:1")],
@@ -145,35 +138,89 @@ def get_size_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ==========================================
-# 🔄 تحديث التوكن
+# 👮‍♂️ أوامر الإدارة (Add/Remove Users)
 # ==========================================
+
+# إضافة مستخدم: /id 12345
+@dp.message(Command("id"))
+async def add_user(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID: return # للأدمن فقط
+    try:
+        new_id = int(msg.text.split()[1])
+        if new_id in ALLOWED_USERS:
+            await msg.reply("⚠️ المستخدم موجود بالفعل.")
+        else:
+            ALLOWED_USERS.add(new_id)
+            save_users(list(ALLOWED_USERS))
+            await msg.reply(f"✅ تمت إضافة المستخدم: `{new_id}`", parse_mode="Markdown")
+            # إشعار للمستخدم الجديد (اختياري)
+            try: await bot.send_message(new_id, "🎉 تم تفعيل حسابك لاستخدام البوت!")
+            except: pass
+    except:
+        await msg.reply("⚠️ خطأ. الصيغة:\n`/id الآيدي`", parse_mode="Markdown")
+
+# حذف مستخدم: /ids 12345
+@dp.message(Command("ids"))
+async def remove_user(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID: return
+    try:
+        target_id = int(msg.text.split()[1])
+        if target_id == ADMIN_ID:
+            await msg.reply("🚫 لا يمكنك حذف الأدمن!")
+            return
+        
+        if target_id in ALLOWED_USERS:
+            ALLOWED_USERS.remove(target_id)
+            save_users(list(ALLOWED_USERS))
+            await msg.reply(f"🗑️ تم حذف المستخدم: `{target_id}`", parse_mode="Markdown")
+        else:
+            await msg.reply("⚠️ هذا المستخدم غير موجود.")
+    except:
+        await msg.reply("⚠️ خطأ. الصيغة:\n`/ids الآيدي`", parse_mode="Markdown")
+
+# عرض القائمة: /users
+@dp.message(Command("users"))
+async def list_users(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID: return
+    text = "👥 **قائمة المصرح لهم:**\n\n"
+    for uid in ALLOWED_USERS:
+        text += f"🆔 `{uid}`\n"
+    await msg.reply(text, parse_mode="Markdown")
+
+# تحديث التوكن: /token
 @dp.message(Command("token"))
 async def update_token(msg: types.Message):
-    if not is_admin(msg.from_user.id): return
+    if msg.from_user.id != ADMIN_ID: return
     try:
         new_key = msg.text.split(maxsplit=1)[1]
         gemini.set_new_token(new_key)
-        await msg.reply("✅ تم التحديث.")
+        await msg.reply("✅ تم تحديث التوكن.")
     except:
-        await msg.reply("⚠️ خطأ.")
+        await msg.reply("⚠️ خطأ في التوكن.")
 
 # ==========================================
-# 📩 الهاندلرز
+# 📩 معالجة الرسائل (للمصرح لهم فقط)
 # ==========================================
+
 @dp.message(CommandStart())
 async def start(msg: types.Message):
-    if is_admin(msg.from_user.id): await msg.answer("👋 **البوت جاهز!**")
+    if not is_authorized(msg.from_user.id):
+        await msg.answer("⛔️ عذراً، هذا البوت خاص.")
+        return
+    await msg.answer("👋 **أهلاً بك!**\nأرسل نصاً للتوليد، أو صورة للتعديل.")
 
 @dp.message(F.text)
 async def handle_text(msg: types.Message):
-    if not is_admin(msg.from_user.id): return
-    if msg.text.startswith("/token"): return
+    if not is_authorized(msg.from_user.id): return
+    if msg.text.startswith("/"): return # تجاهل الأوامر
+    
     user_pending[msg.from_user.id] = {'prompt': msg.text, 'images': None, 'msg_id': msg.message_id}
-    await msg.reply("📏 اختر المقاس:", reply_markup=get_size_keyboard())
+    await msg.reply("📏 اختر مقاس الصورة:", reply_markup=get_size_keyboard())
 
 @dp.message(F.photo)
 async def handle_photos(msg: types.Message):
-    if not is_admin(msg.from_user.id): return
+    if not is_authorized(msg.from_user.id): return
+    
     group_id = msg.media_group_id
     if not group_id:
         await process_images(msg, [msg])
@@ -208,11 +255,12 @@ async def process_images(ctx, msgs):
         await ctx.reply("📏 اختر المقاس:", reply_markup=get_size_keyboard())
     except Exception as e:
         await wait.delete()
-        await bot.send_message(ADMIN_ID, f"Error: {e}")
+        if ctx.from_user.id == ADMIN_ID:
+            await ctx.reply(f"Error: {e}")
 
 @dp.callback_query(F.data.startswith("size:"))
 async def on_size(call: CallbackQuery):
-    if not is_admin(call.from_user.id): return
+    if not is_authorized(call.from_user.id): return
     uid = call.from_user.id
     if uid not in user_pending:
         await call.message.edit_text("❌ انتهت الجلسة.")
@@ -234,7 +282,7 @@ async def on_size(call: CallbackQuery):
         except:
              await call.message.answer_photo(file, caption=f"✅ {data['prompt']}")
     else:
-        await call.message.edit_text(f"❌ {err}")
+        await call.message.edit_text(f"❌ حدث خطأ: {err}")
 
 @dp.callback_query(F.data == "cancel")
 async def on_cancel(call: CallbackQuery):
