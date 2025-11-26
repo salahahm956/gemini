@@ -14,10 +14,10 @@ from aiogram.enums import ChatAction
 # 1. توكن البوت
 BOT_TOKEN = "8395701844:AAHaPmHA4cM1WGqz3IWqNpx0YwS5tauqyhE"
 
-# 2. آيدي المطور (لاستقبال تقارير الأخطاء الخام)
+# 2. آيدي المطور (المسموح له فقط بالاستخدام)
 ADMIN_ID = 6595593335
 
-# 3. توكن GeminiGen (الجديد من طلب cURL الأخير)
+# 3. توكن GeminiGen (من طلبك الأخير الناجح)
 GEMINI_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjQxNzg0MTksInN1YiI6IjY3MGJkNmNlLWM5NTktMTFmMC1iNjcwLTJlZjgyZDcwM2EwOSJ9.PMeS1YB_Q_TrWKaQKhUe8jB4x7qZzwTnZHlAp--h-Xw"
 
 API_BASE = "https://api.geminigen.ai"
@@ -30,11 +30,16 @@ user_pending = {}
 album_buffer = {}
 
 # ==========================================
+# 🔐 دالة التحقق من الصلاحية (Security Check)
+# ==========================================
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+# ==========================================
 # 🧠 كلاس التعامل مع Gemini API
 # ==========================================
 class GeminiClient:
     def __init__(self):
-        # الهيدرز مطابقة تماماً لطلب cURL الجديد
         self.api_headers = {
             "authority": "api.geminigen.ai",
             "accept": "application/json, text/plain, */*",
@@ -42,103 +47,81 @@ class GeminiClient:
             "authorization": f"Bearer {GEMINI_TOKEN}",
             "origin": "https://geminigen.ai",
             "referer": "https://geminigen.ai/",
-            "user-agent": "Mozilla/5.0 (Linux; Android 10; M2006C3LC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36",
-            # ملاحظة: لا نضع content-type هنا يدوياً، المكتبة ستضعه تلقائياً مع الـ boundary
+            "user-agent": "Mozilla/5.0 (Linux; Android 10; M2006C3LC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36"
         }
 
     async def report_error_to_admin(self, error_type, details):
-        """دالة لإرسال الخطأ الخام للمطور"""
         try:
-            error_msg = f"🚨 **SYSTEM ERROR REPORT**\n\n**Type:** {error_type}\n\n**Details (Raw):**\n`{str(details)[:3500]}`" 
+            error_msg = f"🚨 **SYSTEM ERROR**\nType: {error_type}\nRaw: `{str(details)[:3500]}`" 
             await bot.send_message(ADMIN_ID, error_msg)
-        except Exception as e:
-            print(f"Failed to send error to admin: {e}")
+        except:
+            pass
 
     async def generate_image(self, prompt, aspect_ratio, images_data=None):
-        timeout = aiohttp.ClientTimeout(total=300) # 5 دقائق
+        timeout = aiohttp.ClientTimeout(total=300)
         
         async with aiohttp.ClientSession(headers=self.api_headers, timeout=timeout) as session:
             try:
-                # بناء البيانات (Multipart Form Data)
                 data = aiohttp.FormData()
-                
-                # 1. الحقول النصية (كما في الطلب)
                 data.add_field('prompt', prompt)
                 data.add_field('model', 'imagen-pro')
                 data.add_field('aspect_ratio', aspect_ratio)
                 data.add_field('style', 'None')
 
-                # 2. ملفات الصور (Files)
                 if images_data:
                     print(f"🚀 Sending Edit Request ({len(images_data)} images)...")
                     for i, img_bytes in enumerate(images_data):
-                        # الاسم يجب أن يكون "files"
-                        data.add_field(
-                            'files', 
-                            img_bytes, 
-                            filename=f"image_{i}.jpg", 
-                            content_type='image/jpeg'
-                        )
+                        data.add_field('files', img_bytes, filename=f"image_{i}.jpg", content_type='image/jpeg')
                 else:
                     print("🚀 Sending Generate Request...")
 
-                # 3. إرسال الطلب (POST)
                 async with session.post(f"{API_BASE}/api/generate_image", data=data) as resp:
                     response_text = await resp.text()
-                    
-                    # فحص الأخطاء المباشرة
                     if resp.status != 200:
                         await self.report_error_to_admin(f"API POST Failed ({resp.status})", response_text)
-                        raise Exception("فشل الاتصال بالسيرفر (HTTP Error).")
-                    
+                        raise Exception(f"HTTP Error {resp.status}")
                     try:
                         result = json.loads(response_text)
                     except:
                         await self.report_error_to_admin("JSON Parse Error", response_text)
-                        raise Exception("رد السيرفر غير مفهوم.")
+                        raise Exception("Invalid JSON response")
 
                 uuid = result.get('uuid')
                 if not uuid:
                     await self.report_error_to_admin("Missing UUID", response_text)
-                    raise Exception("لم يتم استلام معرف المهمة.")
+                    raise Exception("No UUID")
 
-                # 4. انتظار النتيجة (Polling)
                 print(f"⏳ Waiting for UUID: {uuid}")
                 image_url = None
                 
-                for _ in range(100): # محاولة لمدة 5 دقائق
+                for _ in range(100):
                     async with session.get(f"{API_BASE}/api/history/{uuid}") as hist_resp:
                         if hist_resp.status == 200:
                             status_data = await hist_resp.json()
                             status = status_data.get('status')
                             
-                            if status == 2: # نجاح ✅
+                            if status == 2: # Done
                                 image_url = status_data['generated_image'][0]['image_url']
                                 break 
-                            
-                            elif status == 3: # فشل ❌
+                            elif status == 3: # Failed
+                                error_msg = status_data.get('error_message') or status_data.get('error') or 'Unknown'
+                                if "high traffic" in str(error_msg).lower():
+                                    raise Exception("⚠️ ضغط عالي على السيرفر، حاول لاحقاً.")
                                 await self.report_error_to_admin("Job Failed (Status 3)", json.dumps(status_data, indent=2))
-                                error_desc = status_data.get('error', 'Unknown Error')
-                                raise Exception(f"رفض السيرفر الطلب: {error_desc}")
-                        else:
-                            # خطأ في فحص الحالة
-                            raw_hist = await hist_resp.text()
-                            await self.report_error_to_admin(f"History Check Failed ({hist_resp.status})", raw_hist)
+                                raise Exception(f"رفض السيرفر: {error_msg}")
                         
                     await asyncio.sleep(3)
                 
                 if not image_url:
-                    await self.report_error_to_admin("Timeout", f"UUID: {uuid} stuck in processing.")
                     raise Exception("انتهت مهلة الانتظار.")
 
-                # 5. تحميل الصورة النهائية (جلسة نظيفة)
                 print(f"📥 Downloading Image...")
                 async with aiohttp.ClientSession() as img_session:
                     async with img_session.get(image_url) as img_get:
                         if img_get.status == 200:
                             return await img_get.read(), None
                         else:
-                            await self.report_error_to_admin("Image Download Failed", f"URL: {image_url}\nStatus: {img_get.status}")
+                            await self.report_error_to_admin("Download Failed", f"Status: {img_get.status}")
                             raise Exception("فشل تحميل الصورة النهائية.")
 
             except Exception as e:
@@ -147,7 +130,7 @@ class GeminiClient:
 gemini = GeminiClient()
 
 # ==========================================
-# ⌨️ لوحة الأزرار
+# ⌨️ الكيبورد
 # ==========================================
 def get_size_keyboard():
     keyboard = [
@@ -161,16 +144,21 @@ def get_size_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # ==========================================
-# 📩 معالجة الرسائل
+# 📩 معالجة الرسائل (مع حظر الغرباء)
 # ==========================================
 
 @dp.message(CommandStart())
 async def start(msg: types.Message):
-    await msg.answer("👋 **مرحباً!**\nأرسل نصاً للتوليد، أو صوراً للتعديل.")
+    # ⛔️ تجاهل أي شخص ليس المطور
+    if not is_admin(msg.from_user.id): return
 
-# استقبال النص
+    await msg.answer("👋 **أهلاً بك أيها المطور!**\nالنظام جاهز للعمل.")
+
 @dp.message(F.text)
 async def handle_text(msg: types.Message):
+    # ⛔️ تجاهل الغرباء
+    if not is_admin(msg.from_user.id): return
+
     user_pending[msg.from_user.id] = {
         'prompt': msg.text,
         'images': None,
@@ -178,9 +166,11 @@ async def handle_text(msg: types.Message):
     }
     await msg.reply("📏 اختر مقاس الصورة:", reply_markup=get_size_keyboard())
 
-# استقبال الصور (معالجة الألبومات)
 @dp.message(F.photo)
 async def handle_photos(msg: types.Message):
+    # ⛔️ تجاهل الغرباء
+    if not is_admin(msg.from_user.id): return
+
     user_id = msg.from_user.id
     group_id = msg.media_group_id
 
@@ -229,9 +219,7 @@ async def process_images(msg_context, messages_list):
 
     except Exception as e:
         await wait_msg.delete()
-        await msg_context.reply("❌ حدث خطأ أثناء استقبال الصور.")
-        # إرسال تقرير للمطور
-        await bot.send_message(ADMIN_ID, f"🚨 **Telegram Download Error**\n`{str(e)}`")
+        await bot.send_message(ADMIN_ID, f"⚠️ Error processing inputs: {e}")
 
 # ==========================================
 # 🖱️ معالجة الأزرار
@@ -239,6 +227,9 @@ async def process_images(msg_context, messages_list):
 
 @dp.callback_query(F.data.startswith("size:"))
 async def on_size_select(call: CallbackQuery):
+    # ⛔️ تجاهل الغرباء
+    if not is_admin(call.from_user.id): return
+
     user_id = call.from_user.id
     size = call.data.replace("size:", "")
     
@@ -251,7 +242,7 @@ async def on_size_select(call: CallbackQuery):
     images = data['images']
     
     mode = "تعديل" if images else "توليد"
-    await call.message.edit_text(f"⏳ جاري {mode} الصورة...\nقد يستغرق الأمر دقيقتين.")
+    await call.message.edit_text(f"⏳ جاري {mode} الصورة...")
     await bot.send_chat_action(call.message.chat.id, ChatAction.UPLOAD_PHOTO)
     
     final_img_bytes, error = await gemini.generate_image(prompt, size, images)
@@ -264,21 +255,18 @@ async def on_size_select(call: CallbackQuery):
         except:
              await call.message.answer_photo(file, caption=f"✅ {prompt}")
     else:
-        # رسالة بسيطة للمستخدم
-        await call.message.edit_text("❌ حدث خطأ أثناء المعالجة. تم إشعار المطور.")
-        # التفاصيل للمطور في الخاص (تمت المعالجة داخل الدالة generate_image)
+        await call.message.edit_text(f"❌ خطأ: {error}")
 
 @dp.callback_query(F.data == "cancel")
 async def on_cancel(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    
     if call.from_user.id in user_pending:
         del user_pending[call.from_user.id]
     await call.message.delete()
 
-# ==========================================
-# 🚀 التشغيل
-# ==========================================
 async def main():
-    print("🤖 Bot Started with Advanced Error Reporting...")
+    print("🤖 Bot Started (Private Mode)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
